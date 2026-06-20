@@ -48,7 +48,7 @@ async function buffer(req) {
 // N'interrompt jamais le webhook si ça échoue (on logge juste l'erreur) :
 // on préfère un email envoyé sans ligne Sheet plutôt qu'un webhook qui
 // plante entièrement à cause d'un souci Google.
-async function appendToSheet({ date, customerName, customerEmail, rabbitName, preference, shippingAddress, amount, type, stripeId }) {
+async function appendToSheet({ date, customerName, customerEmail, rabbitName, preference, shippingAddress, phone, amount, type, stripeId }) {
   try {
     const auth = new google.auth.JWT(
       process.env.GOOGLE_SHEETS_CLIENT_EMAIL,
@@ -61,7 +61,7 @@ async function appendToSheet({ date, customerName, customerEmail, rabbitName, pr
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: 'A:K',
+      range: 'A:L',
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[
@@ -76,6 +76,7 @@ async function appendToSheet({ date, customerName, customerEmail, rabbitName, pr
           stripeId,
           preference || 'Non renseignée',
           shippingAddress || 'Non renseignée',
+          phone || 'Non renseigné',
         ]],
       },
     });
@@ -104,7 +105,7 @@ function formatAddress(address) {
   return parts.length ? parts.join(', ') : null;
 }
 
-async function sendNotificationEmail({ customerName, customerEmail, rabbitName, preference, shippingAddress, amount, isFirstPayment }) {
+async function sendNotificationEmail({ customerName, customerEmail, rabbitName, preference, shippingAddress, phone, amount, isFirstPayment }) {
   const preferenceLabel = preference ? (PREFERENCE_LABELS[preference] || preference) : null;
 
   const subject = isFirstPayment
@@ -117,6 +118,7 @@ async function sendNotificationEmail({ customerName, customerEmail, rabbitName, 
     <p><strong>Préférence de composition :</strong> ${preferenceLabel || 'Non renseignée'}</p>
     <p><strong>Client :</strong> ${customerName || 'Non renseigné'}</p>
     <p><strong>Email client :</strong> ${customerEmail || 'Non renseigné'}</p>
+    <p><strong>Téléphone :</strong> ${phone || 'Non renseigné'}</p>
     <p><strong>Adresse de livraison :</strong><br/>${shippingAddress || 'Non renseignée'}</p>
     <p><strong>Montant payé :</strong> ${amount}€</p>
     <hr />
@@ -220,6 +222,13 @@ export default async function handler(req, res) {
       const shippingAddress = formatAddress(
         session.shipping_details?.address || session.customer_details?.address
       );
+      const phone = session.customer_details?.phone || customer?.phone || null;
+
+      // Sauvegarde le téléphone sur le customer Stripe pour qu'il reste
+      // disponible lors des renouvellements mensuels suivants.
+      if (phone && session.customer && !customer?.phone) {
+        await stripe.customers.update(session.customer, { phone });
+      }
 
       await sendNotificationEmail({
         customerName: customer?.name || session.customer_details?.name,
@@ -227,6 +236,7 @@ export default async function handler(req, res) {
         rabbitName,
         preference,
         shippingAddress,
+        phone,
         amount: ((session.amount_total || 0) / 100).toFixed(2),
         isFirstPayment: true,
       });
@@ -238,6 +248,7 @@ export default async function handler(req, res) {
         rabbitName,
         preference: PREFERENCE_LABELS[preference] || preference,
         shippingAddress,
+        phone,
         amount: ((session.amount_total || 0) / 100).toFixed(2) + '€',
         type: 'Premier paiement',
         stripeId: session.id,
@@ -279,6 +290,7 @@ export default async function handler(req, res) {
       }
 
       const shippingAddress = formatAddress(customer.shipping?.address);
+      const phone = customer.phone || null;
 
       await sendNotificationEmail({
         customerName: customer.name,
@@ -286,6 +298,7 @@ export default async function handler(req, res) {
         rabbitName,
         preference,
         shippingAddress,
+        phone,
         amount: (invoice.amount_paid / 100).toFixed(2),
         isFirstPayment: false,
       });
@@ -297,6 +310,7 @@ export default async function handler(req, res) {
         rabbitName,
         preference: PREFERENCE_LABELS[preference] || preference,
         shippingAddress,
+        phone,
         amount: (invoice.amount_paid / 100).toFixed(2) + '€',
         type: 'Renouvellement',
         stripeId: invoice.id,
