@@ -12,6 +12,7 @@
 // - NOTIFY_EMAIL           : ton adresse email pour recevoir les rappels (ex: onebrand.pro@gmail.com)
 
 import Stripe from 'stripe';
+import getRawBody from 'raw-body';
 
 export const config = {
   api: {
@@ -21,13 +22,14 @@ export const config = {
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Lit le body brut de la requête (nécessaire pour la vérification de signature Stripe)
-function buffer(readable) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    readable.on('data', (chunk) => chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk));
-    readable.on('end', () => resolve(Buffer.concat(chunks)));
-    readable.on('error', reject);
+// Lit le body brut de la requête (nécessaire pour la vérification de signature Stripe).
+// Utilise getRawBody (paquet officiel utilisé par Stripe/Vercel/Micro en interne)
+// car la lecture manuelle via req.on('data'/'end') s'est révélée peu fiable
+// sur certaines versions du runtime serverless de Vercel.
+async function buffer(req) {
+  return getRawBody(req, {
+    length: req.headers['content-length'],
+    limit: '1mb',
   });
 }
 
