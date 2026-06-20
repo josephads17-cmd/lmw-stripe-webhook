@@ -48,7 +48,7 @@ async function buffer(req) {
 // N'interrompt jamais le webhook si ça échoue (on logge juste l'erreur) :
 // on préfère un email envoyé sans ligne Sheet plutôt qu'un webhook qui
 // plante entièrement à cause d'un souci Google.
-async function appendToSheet({ date, customerName, customerEmail, rabbitName, amount, type, stripeId }) {
+async function appendToSheet({ date, customerName, customerEmail, rabbitName, preference, shippingAddress, amount, type, stripeId }) {
   try {
     const auth = new google.auth.JWT(
       process.env.GOOGLE_SHEETS_CLIENT_EMAIL,
@@ -61,7 +61,7 @@ async function appendToSheet({ date, customerName, customerEmail, rabbitName, am
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: 'A:I',
+      range: 'A:K',
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[
@@ -74,6 +74,8 @@ async function appendToSheet({ date, customerName, customerEmail, rabbitName, am
           'À préparer',
           '',
           stripeId,
+          preference || 'Non renseignée',
+          shippingAddress || 'Non renseignée',
         ]],
       },
     });
@@ -82,7 +84,29 @@ async function appendToSheet({ date, customerName, customerEmail, rabbitName, am
   }
 }
 
-async function sendNotificationEmail({ customerName, customerEmail, rabbitName, amount, isFirstPayment }) {
+const PREFERENCE_LABELS = {
+  equilibree: 'Équilibrée',
+  gourmande: 'Gourmande',
+  occupation: 'Occupation',
+  mastication: 'Mastication douce',
+};
+
+// Met en forme un objet adresse Stripe (line1, line2, postal_code, city,
+// country) en une chaîne lisible pour l'email et le Sheet.
+function formatAddress(address) {
+  if (!address) return null;
+  const parts = [
+    address.line1,
+    address.line2,
+    [address.postal_code, address.city].filter(Boolean).join(' '),
+    address.country,
+  ].filter(Boolean);
+  return parts.length ? parts.join(', ') : null;
+}
+
+async function sendNotificationEmail({ customerName, customerEmail, rabbitName, preference, shippingAddress, amount, isFirstPayment }) {
+  const preferenceLabel = preference ? (PREFERENCE_LABELS[preference] || preference) : null;
+
   const subject = isFirstPayment
     ? `🐰 Nouvelle commande La Maison Winnie — Box pour ${rabbitName || 'un lapin'}`
     : `🐰 Renouvellement mensuel — Box pour ${rabbitName || 'un lapin'}`;
@@ -90,8 +114,10 @@ async function sendNotificationEmail({ customerName, customerEmail, rabbitName, 
   const html = `
     <h2>${isFirstPayment ? 'Nouvelle commande !' : 'Renouvellement mensuel'}</h2>
     <p><strong>Lapin :</strong> ${rabbitName || 'Non renseigné'}</p>
+    <p><strong>Préférence de composition :</strong> ${preferenceLabel || 'Non renseignée'}</p>
     <p><strong>Client :</strong> ${customerName || 'Non renseigné'}</p>
     <p><strong>Email client :</strong> ${customerEmail || 'Non renseigné'}</p>
+    <p><strong>Adresse de livraison :</strong><br/>${shippingAddress || 'Non renseignée'}</p>
     <p><strong>Montant payé :</strong> ${amount}€</p>
     <hr />
     <p>👉 Action à faire : préparer et expédier la box, puis envoyer le numéro de suivi au client.</p>
@@ -159,9 +185,31 @@ export default async function handler(req, res) {
         rabbitField?.numeric?.value ||
         null;
 
-      if (rabbitName && session.subscription) {
-        await stripe.subscriptions.update(session.subscription, {
-          metadata: { rabbit_name: rabbitName },
+      const preferenceField = session.custom_fields?.find(
+        (f) => f.key === 'preferencebox'
+      );
+      const preference =
+        preferenceField?.dropdown?.value ||
+        preferenceField?.text?.value ||
+        null;
+
+      if ((rabbitName || preference) && session.subscription) {
+        const metadata = {};
+        if (rabbitName) metadata.rabbit_name = rabbitName;
+        if (preference) metadata.preference = preference;
+        await stripe.subscriptions.update(session.subscription, { metadata });
+      }
+
+      // Sauvegarde l'adresse de livraison sur le customer Stripe (champ
+      // natif "shipping"), pour qu'elle reste disponible et consultable
+      // facilement à chaque renouvellement mensuel suivant.
+      const shippingDetails = session.shipping_details;
+      if (shippingDetails?.address && session.customer) {
+        await stripe.customers.update(session.customer, {
+          shipping: {
+            name: shippingDetails.name || session.customer_details?.name || '',
+            address: shippingDetails.address,
+          },
         });
       }
 
@@ -169,10 +217,16 @@ export default async function handler(req, res) {
         ? await stripe.customers.retrieve(session.customer)
         : null;
 
+      const shippingAddress = formatAddress(
+        session.shipping_details?.address || session.customer_details?.address
+      );
+
       await sendNotificationEmail({
         customerName: customer?.name || session.customer_details?.name,
         customerEmail: customer?.email || session.customer_details?.email,
         rabbitName,
+        preference,
+        shippingAddress,
         amount: ((session.amount_total || 0) / 100).toFixed(2),
         isFirstPayment: true,
       });
@@ -182,6 +236,8 @@ export default async function handler(req, res) {
         customerName: customer?.name || session.customer_details?.name,
         customerEmail: customer?.email || session.customer_details?.email,
         rabbitName,
+        preference: PREFERENCE_LABELS[preference] || preference,
+        shippingAddress,
         amount: ((session.amount_total || 0) / 100).toFixed(2) + '€',
         type: 'Premier paiement',
         stripeId: session.id,
@@ -210,6 +266,7 @@ export default async function handler(req, res) {
       const customer = await stripe.customers.retrieve(invoice.customer);
 
       let rabbitName = null;
+      let preference = null;
       if (invoice.subscription) {
         const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
         rabbitName =
@@ -218,12 +275,17 @@ export default async function handler(req, res) {
           customer.metadata?.rabbit_name ||
           customer.metadata?.prenom_lapin ||
           null;
+        preference = subscription.metadata?.preference || customer.metadata?.preference || null;
       }
+
+      const shippingAddress = formatAddress(customer.shipping?.address);
 
       await sendNotificationEmail({
         customerName: customer.name,
         customerEmail: customer.email,
         rabbitName,
+        preference,
+        shippingAddress,
         amount: (invoice.amount_paid / 100).toFixed(2),
         isFirstPayment: false,
       });
@@ -233,6 +295,8 @@ export default async function handler(req, res) {
         customerName: customer.name,
         customerEmail: customer.email,
         rabbitName,
+        preference: PREFERENCE_LABELS[preference] || preference,
+        shippingAddress,
         amount: (invoice.amount_paid / 100).toFixed(2) + '€',
         type: 'Renouvellement',
         stripeId: invoice.id,
