@@ -6,19 +6,24 @@
 // - "checkout.session.completed" : premier paiement. Récupère le prénom
 //   du lapin saisi dans le custom_field "prnomdulapin" du formulaire
 //   Stripe Checkout, le copie dans les metadata de la subscription
-//   (pour les renouvellements futurs), puis envoie l'email de rappel.
+//   (pour les renouvellements futurs), envoie l'email de rappel, et
+//   ajoute une ligne dans le Google Sheet de suivi.
 // - "invoice.payment_succeeded" : renouvellements mensuels automatiques
 //   uniquement (le tout premier paiement est ignoré ici car déjà géré
-//   par checkout.session.completed, pour éviter un double email).
+//   par checkout.session.completed, pour éviter un double email/ligne).
 //
 // Variables d'environnement nécessaires (à configurer dans Vercel > Settings > Environment Variables) :
-// - STRIPE_SECRET_KEY      : clé secrète Stripe (sk_live_..., sk_test_..., ou clé restreinte rk_live_.../rk_test_...)
-// - STRIPE_WEBHOOK_SECRET  : secret de signature du webhook (whsec_...)
-// - RESEND_API_KEY         : clé API Resend
-// - NOTIFY_EMAIL           : ton adresse email pour recevoir les rappels (ex: onebrand.pro@gmail.com)
+// - STRIPE_SECRET_KEY        : clé secrète Stripe (sk_live_..., sk_test_..., ou clé restreinte rk_live_.../rk_test_...)
+// - STRIPE_WEBHOOK_SECRET    : secret de signature du webhook (whsec_...)
+// - RESEND_API_KEY           : clé API Resend
+// - NOTIFY_EMAIL             : ton adresse email pour recevoir les rappels (ex: onebrand.pro@gmail.com)
+// - GOOGLE_SHEETS_CLIENT_EMAIL : "client_email" du fichier JSON du compte de service Google
+// - GOOGLE_SHEETS_PRIVATE_KEY  : "private_key" du fichier JSON du compte de service Google
+// - GOOGLE_SHEET_ID            : ID de la feuille Google Sheets (dans son URL, entre /d/ et /edit)
 
 import Stripe from 'stripe';
 import getRawBody from 'raw-body';
+import { google } from 'googleapis';
 
 export const config = {
   api: {
@@ -37,6 +42,44 @@ async function buffer(req) {
     length: req.headers['content-length'],
     limit: '1mb',
   });
+}
+
+// Ajoute une ligne dans le Google Sheet de suivi des commandes.
+// N'interrompt jamais le webhook si ça échoue (on logge juste l'erreur) :
+// on préfère un email envoyé sans ligne Sheet plutôt qu'un webhook qui
+// plante entièrement à cause d'un souci Google.
+async function appendToSheet({ date, customerName, customerEmail, rabbitName, amount, type, stripeId }) {
+  try {
+    const auth = new google.auth.JWT(
+      process.env.GOOGLE_SHEETS_CLIENT_EMAIL,
+      null,
+      process.env.GOOGLE_SHEETS_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      ['https://www.googleapis.com/auth/spreadsheets']
+    );
+
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: 'A:I',
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[
+          date,
+          customerName || 'Non renseigné',
+          customerEmail || 'Non renseigné',
+          rabbitName || 'Non renseigné',
+          amount,
+          type,
+          'À préparer',
+          '',
+          stripeId,
+        ]],
+      },
+    });
+  } catch (err) {
+    console.error('Erreur écriture Google Sheet:', err.message);
+  }
 }
 
 async function sendNotificationEmail({ customerName, customerEmail, rabbitName, amount, isFirstPayment }) {
@@ -133,6 +176,16 @@ export default async function handler(req, res) {
         amount: ((session.amount_total || 0) / 100).toFixed(2),
         isFirstPayment: true,
       });
+
+      await appendToSheet({
+        date: new Date().toLocaleDateString('fr-FR'),
+        customerName: customer?.name || session.customer_details?.name,
+        customerEmail: customer?.email || session.customer_details?.email,
+        rabbitName,
+        amount: ((session.amount_total || 0) / 100).toFixed(2) + '€',
+        type: 'Premier paiement',
+        stripeId: session.id,
+      });
     } catch (err) {
       console.error('Erreur traitement checkout.session.completed:', err);
     }
@@ -173,6 +226,16 @@ export default async function handler(req, res) {
         rabbitName,
         amount: (invoice.amount_paid / 100).toFixed(2),
         isFirstPayment: false,
+      });
+
+      await appendToSheet({
+        date: new Date().toLocaleDateString('fr-FR'),
+        customerName: customer.name,
+        customerEmail: customer.email,
+        rabbitName,
+        amount: (invoice.amount_paid / 100).toFixed(2) + '€',
+        type: 'Renouvellement',
+        stripeId: invoice.id,
       });
     } catch (err) {
       console.error('Erreur traitement invoice.payment_succeeded:', err);
