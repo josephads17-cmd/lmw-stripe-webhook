@@ -4,6 +4,7 @@
   "private": true,
   "dependencies": {
     "stripe": "^16.0.0",
-    "raw-body": "^2.5.2"
+    "raw-body": "^2.5.2",
+    "googleapis": "^144.0.0"
   }
 }
