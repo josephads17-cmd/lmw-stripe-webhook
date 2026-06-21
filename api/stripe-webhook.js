@@ -6,11 +6,14 @@
 // - "checkout.session.completed" : premier paiement. Récupère le prénom
 //   du lapin saisi dans le custom_field "prnomdulapin" du formulaire
 //   Stripe Checkout, le copie dans les metadata de la subscription
-//   (pour les renouvellements futurs), envoie l'email de rappel, et
-//   ajoute une ligne dans le Google Sheet de suivi.
+//   (pour les renouvellements futurs), envoie un email de notification
+//   interne (à Joseph), un email de bienvenue au CLIENT, et ajoute une
+//   ligne dans le Google Sheet de suivi.
 // - "invoice.payment_succeeded" : renouvellements mensuels automatiques
 //   uniquement (le tout premier paiement est ignoré ici car déjà géré
 //   par checkout.session.completed, pour éviter un double email/ligne).
+//   Pas d'email de bienvenue envoyé ici, uniquement la notification
+//   interne — l'email de bienvenue n'a de sens qu'au premier paiement.
 //
 // Variables d'environnement nécessaires (à configurer dans Vercel > Settings > Environment Variables) :
 // - STRIPE_SECRET_KEY        : clé secrète Stripe (sk_live_..., sk_test_..., ou clé restreinte rk_live_.../rk_test_...)
@@ -20,6 +23,11 @@
 // - GOOGLE_SHEETS_CLIENT_EMAIL : "client_email" du fichier JSON du compte de service Google
 // - GOOGLE_SHEETS_PRIVATE_KEY  : "private_key" du fichier JSON du compte de service Google
 // - GOOGLE_SHEET_ID            : ID de la feuille Google Sheets (dans son URL, entre /d/ et /edit)
+//
+// Note : l'email de bienvenue est envoyé depuis bonjour@lamaisonwinnie.com
+// (au lieu de notifications@lamaisonwinnie.com utilisé pour les emails
+// internes) — les deux adresses doivent être couvertes par le même
+// domaine déjà vérifié sur Resend, aucune config supplémentaire requise.
 
 import Stripe from 'stripe';
 import getRawBody from 'raw-body';
@@ -145,6 +153,128 @@ async function sendNotificationEmail({ customerName, customerEmail, rabbitName, 
   }
 }
 
+// Envoie un email de bienvenue au CLIENT (pas à Joseph), uniquement lors
+// du premier paiement. Design soigné, couleurs de la marque (cream/sand/
+// terra/brown), cohérent avec l'identité visuelle du site.
+async function sendWelcomeEmail({ customerName, customerEmail, rabbitName, preference }) {
+  if (!customerEmail) return;
+
+  const preferenceLabel = preference ? (PREFERENCE_LABELS[preference] || preference) : null;
+  const firstName = (customerName || '').split(' ')[0] || '';
+
+  const html = `
+  <!DOCTYPE html>
+  <html>
+  <body style="margin:0; padding:0; background-color:#f6efe9; font-family: Georgia, 'Times New Roman', serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f6efe9; padding: 32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" style="max-width:560px; background-color:#fdf6f0; border-radius:16px; overflow:hidden; border:1px solid #e8c4ac;">
+
+            <tr>
+              <td style="background-color:#8b5e3c; padding: 28px 32px; text-align:center;">
+                <span style="color:#fdf6f0; font-size:13px; letter-spacing:2px; text-transform:uppercase; font-family: Arial, sans-serif;">La Maison Winnie</span>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 36px 32px 8px 32px;">
+                <h1 style="margin:0 0 16px 0; color:#3f241c; font-size:24px; font-weight:normal;">
+                  Bienvenue${firstName ? `, ${firstName}` : ''} 🐰
+                </h1>
+                <p style="margin:0 0 16px 0; color:#5a4338; font-size:15px; line-height:1.6; font-family: Arial, sans-serif;">
+                  Merci d'avoir choisi La Maison Winnie${rabbitName ? ` pour <strong>${rabbitName}</strong>` : ''} !
+                  Ta commande est bien confirmée, et on prépare déjà sa première box avec soin.
+                </p>
+              </td>
+            </tr>
+
+            ${rabbitName || preferenceLabel ? `
+            <tr>
+              <td style="padding: 8px 32px 24px 32px;">
+                <table role="presentation" width="100%" style="background-color:#f6e4d7; border-radius:10px;">
+                  <tr>
+                    <td style="padding: 18px 20px; font-family: Arial, sans-serif;">
+                      ${rabbitName ? `<p style="margin:0 0 6px 0; color:#3f241c; font-size:14px;"><strong>Box préparée pour :</strong> ${rabbitName}</p>` : ''}
+                      ${preferenceLabel ? `<p style="margin:0; color:#3f241c; font-size:14px;"><strong>Préférence choisie :</strong> ${preferenceLabel}</p>` : ''}
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            ` : ''}
+
+            <tr>
+              <td style="padding: 8px 32px 28px 32px; font-family: Arial, sans-serif;">
+                <p style="margin:0 0 12px 0; color:#5a4338; font-size:15px; line-height:1.6;">
+                  Voici ce qui t'attend :
+                </p>
+                <table role="presentation" width="100%">
+                  <tr>
+                    <td style="padding: 6px 0; color:#5a4338; font-size:14px;">📦 &nbsp; Ta box est en cours de préparation</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 6px 0; color:#5a4338; font-size:14px;">🚚 &nbsp; Livraison offerte, tu recevras un numéro de suivi par email</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 6px 0; color:#5a4338; font-size:14px;">🔁 &nbsp; Un email comme celui-ci, en plus discret, t'attend chaque mois</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 6px 0; color:#5a4338; font-size:14px;">✋ &nbsp; Sans engagement : annule à tout moment depuis ton espace client</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 0 32px 32px 32px; text-align:center;">
+                <a href="https://billing.stripe.com/p/login/bJefZhggVbWh5fReDD2Fa00"
+                   style="display:inline-block; background-color:#8b5e3c; color:#fdf6f0; text-decoration:none; padding: 12px 28px; border-radius:8px; font-family: Arial, sans-serif; font-size:14px;">
+                  Gérer mon abonnement
+                </a>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 20px 32px; background-color:#f6e4d7; text-align:center; font-family: Arial, sans-serif;">
+                <p style="margin:0; color:#9c6b5c; font-size:12px;">
+                  Une question ? Écris-nous à
+                  <a href="mailto:onebrand.pro@gmail.com" style="color:#8b5e3c;">onebrand.pro@gmail.com</a>
+                </p>
+                <p style="margin:8px 0 0 0; color:#b89483; font-size:11px;">
+                  © 2026 La Maison Winnie
+                </p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>
+  `;
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: 'La Maison Winnie <bonjour@lamaisonwinnie.com>',
+      to: [customerEmail],
+      subject: `🐰 Bienvenue chez La Maison Winnie${rabbitName ? ` — la box de ${rabbitName} arrive bientôt` : ''}`,
+      html,
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error('Erreur envoi email de bienvenue Resend:', errText);
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
@@ -239,6 +369,13 @@ export default async function handler(req, res) {
         phone,
         amount: ((session.amount_total || 0) / 100).toFixed(2),
         isFirstPayment: true,
+      });
+
+      await sendWelcomeEmail({
+        customerName: customer?.name || session.customer_details?.name,
+        customerEmail: customer?.email || session.customer_details?.email,
+        rabbitName,
+        preference,
       });
 
       await appendToSheet({
