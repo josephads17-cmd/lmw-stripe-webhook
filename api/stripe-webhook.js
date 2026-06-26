@@ -30,6 +30,7 @@
 // domaine déjà vérifié sur Resend, aucune config supplémentaire requise.
 
 import Stripe from 'stripe';
+import crypto from 'crypto';
 import getRawBody from 'raw-body';
 import { google } from 'googleapis';
 
@@ -112,6 +113,61 @@ function formatAddress(address) {
   ].filter(Boolean);
   return parts.length ? parts.join(', ') : null;
 }
+async function sendMetaCAPI({ eventId, email, phone, firstName, lastName, city, zip, value }) {
+    try {
+      const pixelId = process.env.META_PIXEL_ID;
+      const accessToken = process.env.META_ACCESS_TOKEN;
+      if (!pixelId || !accessToken) return;
+
+      function sha256(str) {
+        if (!str) return undefined;
+        return crypto.createHash('sha256').update(str.trim().toLowerCase()).digest('hex');
+      }
+
+      const userData = {};
+      if (email)     userData.em      = [sha256(email)];
+      if (phone)     userData.ph      = [sha256(phone.replace(/\s+/g, ''))];
+      if (firstName) userData.fn      = [sha256(firstName)];
+      if (lastName)  userData.ln      = [sha256(lastName)];
+      if (city)      userData.ct      = [sha256(city)];
+      if (zip)       userData.zp      = [sha256(zip)];
+                     userData.country = [sha256('fr')];
+
+      const payload = {
+        data: [{
+          event_name: 'Purchase',
+          event_time: Math.floor(Date.now() / 1000),
+          event_id: eventId,
+          event_source_url: 'https://lamaisonwinnie.com/merci.html',
+          action_source: 'website',
+          user_data: userData,
+          custom_data: {
+            currency: 'EUR',
+            value: value,
+            order_id: eventId,
+          },
+        }],
+        access_token: accessToken,
+      };
+
+      const response = await fetch(
+        `https://graph.facebook.com/v21.0/${pixelId}/events`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+      );
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error('Erreur Meta CAPI:', errText);
+      }
+    } catch (err) {
+      console.error('Erreur Meta CAPI (silencieuse):', err.message);
+    }
+  }
+
 
 async function sendNotificationEmail({ customerName, customerEmail, rabbitName, preference, shippingAddress, phone, amount, isFirstPayment }) {
   const preferenceLabel = preference ? (PREFERENCE_LABELS[preference] || preference) : null;
@@ -390,6 +446,17 @@ export default async function handler(req, res) {
         type: 'Premier paiement',
         stripeId: session.id,
       });
+      const nameParts = (customer?.name || session.customer_details?.name || '').trim().split(' ');
+        await sendMetaCAPI({
+          eventId: session.id,
+          email:     customer?.email || session.customer_details?.email,
+          phone:     session.customer_details?.phone || customer?.phone,
+          firstName: nameParts[0],
+          lastName:  nameParts.slice(1).join(' '),
+          city:      session.shipping_details?.address?.city || session.customer_details?.address?.city,
+          zip:       session.shipping_details?.address?.postal_code || session.customer_details?.address?.postal_code,
+          value:     (session.amount_total || 0) / 100,
+        });
     } catch (err) {
       console.error('Erreur traitement checkout.session.completed:', err);
     }
