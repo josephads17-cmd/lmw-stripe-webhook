@@ -295,7 +295,7 @@ async function sendWelcomeEmail({ customerName, customerEmail, rabbitName, prefe
               <td style="padding: 20px 32px; background-color:#f6e4d7; text-align:center; font-family: Arial, sans-serif;">
                 <p style="margin:0; color:#9c6b5c; font-size:12px;">
                   Une question ? Écris-nous à
-                  <a href="mailto:onebrand.pro@gmail.com" style="color:#8b5e3c;">onebrand.pro@gmail.com</a>
+                  <a href="mailto:lamaisonwinnie@gmail.com" style="color:#8b5e3c;">lamaisonwinnie@gmail.com</a>
                 </p>
                 <p style="margin:8px 0 0 0; color:#b89483; font-size:11px;">
                   © 2026 La Maison Winnie
